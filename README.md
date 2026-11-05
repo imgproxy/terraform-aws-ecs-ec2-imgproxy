@@ -21,7 +21,7 @@ Also supported: request signing, imgproxy Pro and private registries through Sec
 
 ```hcl
 module "imgproxy" {
-  source  = "imgproxy/ecs-imgproxy/aws"
+  source  = "imgproxy/ecs-ec2-imgproxy/aws"
   version = "~> 0.1"
 
   service_name = "imgproxy"

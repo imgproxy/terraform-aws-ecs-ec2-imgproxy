@@ -40,7 +40,7 @@ data "aws_subnets" "default" {
 }
 
 module "imgproxy" {
-  source  = "imgproxy/ecs-imgproxy/aws"
+  source  = "imgproxy/ecs-ec2-imgproxy/aws"
   version = "~> 0.1"
 
   service_name = "imgproxy-insecure"

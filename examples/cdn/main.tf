@@ -48,7 +48,7 @@ data "aws_secretsmanager_secret" "salts" {
 }
 
 module "imgproxy" {
-  source  = "imgproxy/ecs-imgproxy/aws"
+  source  = "imgproxy/ecs-ec2-imgproxy/aws"
   version = "~> 0.1"
 
   service_name = "imgproxy"
