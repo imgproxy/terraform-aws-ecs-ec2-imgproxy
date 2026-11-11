@@ -1,11 +1,11 @@
 output "task_role_arn" {
-  description = "ARN of the IAM role used by the ECS task at runtime."
+  description = "ARN of the IAM role used by the ECS task (or Lambda function) at runtime."
   value       = var.task_role_arn != null ? var.task_role_arn : aws_iam_role.task[0].arn
 }
 
 output "execution_role_arn" {
-  description = "ARN of the IAM role used by the ECS agent to start tasks."
-  value       = var.execution_role_arn != null ? var.execution_role_arn : aws_iam_role.execution[0].arn
+  description = "ARN of the IAM role used by the ECS agent to start tasks. Null for compute_platform = \"lambda\"."
+  value       = var.execution_role_arn != null ? var.execution_role_arn : one(aws_iam_role.execution[*].arn)
 }
 
 output "log_group_name" {
@@ -51,6 +51,11 @@ output "alb_zone_id" {
 output "cloudfront_domain_name" {
   description = "CloudFront distribution domain name."
   value       = length(aws_cloudfront_distribution.main) > 0 ? aws_cloudfront_distribution.main[0].domain_name : null
+}
+
+output "cloudfront_distribution_arn" {
+  description = "CloudFront distribution ARN."
+  value       = length(aws_cloudfront_distribution.main) > 0 ? aws_cloudfront_distribution.main[0].arn : null
 }
 
 output "cloudfront_hosted_zone_id" {

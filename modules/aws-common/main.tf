@@ -2,6 +2,7 @@ data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 
 locals {
+  is_lambda     = var.compute_platform == "lambda"
   alb_subnets   = coalesce(var.alb_subnet_ids, var.subnet_ids)
   http_redirect = var.alb_redirect_http_to_https && length(var.alb_certificate_arns) > 0
   # HTTPS to the origin needs a name the ALB certificate covers; without one CloudFront
@@ -14,6 +15,11 @@ locals {
   cf_locked_origin     = var.enable_cloudfront && var.create_alb
   origin_verify_header = "X-Origin-Verify"
   origin_verify_secret = local.cf_locked_origin ? coalesce(var.cloudfront_origin_verify_secret, one(random_password.origin_verify[*].result)) : null
+
+  # Lambda Function URL origin: CloudFront signs requests (OAC) instead of sending
+  # a secret header, and reaches the function URL host over HTTPS.
+  cf_lambda_origin = var.enable_cloudfront && local.is_lambda
+  lambda_url_host  = var.lambda_function_url != null ? split("/", var.lambda_function_url)[2] : null
 }
 
 resource "random_password" "origin_verify" {
@@ -25,6 +31,16 @@ resource "random_password" "origin_verify" {
 # Cross-variable checks that a single variable validation cannot express.
 resource "terraform_data" "checks" {
   lifecycle {
+    precondition {
+      condition     = !local.is_lambda || !var.create_alb
+      error_message = "compute_platform = \"lambda\" does not use an ALB: set create_alb = false."
+    }
+
+    precondition {
+      condition     = !local.cf_lambda_origin || var.lambda_function_url != null
+      error_message = "lambda_function_url is required when compute_platform = \"lambda\" and enable_cloudfront = true."
+    }
+
     precondition {
       condition     = !var.create_alb || length(var.alb_certificate_arns) > 0 || var.allow_insecure_http
       error_message = "The ALB needs HTTPS: set alb_certificate_arns. To serve plain HTTP for testing only, set allow_insecure_http = true (requests, signed URLs and tokens are then unencrypted)."
@@ -58,7 +74,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
 # Used by the ECS agent to pull the container image and inject secrets at startup.
 
 resource "aws_iam_role" "execution" {
-  count       = var.execution_role_arn == null ? 1 : 0
+  count       = var.execution_role_arn == null && !local.is_lambda ? 1 : 0
   name_prefix = "${var.service_name}-execution-"
 
   assume_role_policy = jsonencode({
@@ -74,13 +90,13 @@ resource "aws_iam_role" "execution" {
 }
 
 resource "aws_iam_role_policy_attachment" "execution_managed" {
-  count      = var.execution_role_arn == null ? 1 : 0
+  count      = var.execution_role_arn == null && !local.is_lambda ? 1 : 0
   role       = aws_iam_role.execution[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_iam_role_policy" "execution_secrets" {
-  count = var.execution_role_arn == null && length(var.secret_arns) > 0 ? 1 : 0
+  count = var.execution_role_arn == null && !local.is_lambda && length(var.secret_arns) > 0 ? 1 : 0
   name  = "${var.service_name}-secrets"
   role  = aws_iam_role.execution[0].name
 
@@ -99,26 +115,60 @@ resource "aws_iam_role_policy" "execution_secrets" {
 
 resource "aws_iam_role" "task" {
   count       = var.task_role_arn == null ? 1 : 0
-  name_prefix = "${var.service_name}-task-"
+  name_prefix = local.is_lambda ? "${var.service_name}-function-" : "${var.service_name}-task-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-      Condition = {
-        ArnLike = {
-          "aws:SourceArn" = "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+    Statement = [merge(
+      {
+        Effect    = "Allow"
+        Principal = { Service = local.is_lambda ? "lambda.amazonaws.com" : "ecs-tasks.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      },
+      local.is_lambda ? {} : {
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+          }
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
         }
-        StringEquals = {
-          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-        }
-      }
-    }]
+      },
+    )]
   })
 
   tags = var.tags
+}
+
+# Lambda only: CloudWatch Logs access, plus ENI management when attached to a VPC.
+resource "aws_iam_role_policy_attachment" "lambda_basic" {
+  count      = var.task_role_arn == null && local.is_lambda ? 1 : 0
+  role       = aws_iam_role.task[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  count      = var.task_role_arn == null && local.is_lambda && var.lambda_vpc_access ? 1 : 0
+  role       = aws_iam_role.task[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+# Lambda only: imgproxy reads its secrets itself at start-up (IMGPROXY_ENV_AWS_SECRET_ID),
+# so the function role, not an execution role, needs access to them.
+resource "aws_iam_role_policy" "task_secrets" {
+  count = var.task_role_arn == null && local.is_lambda && length(var.secret_arns) > 0 ? 1 : 0
+  name  = "${var.service_name}-secrets"
+  role  = aws_iam_role.task[0].name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "secretsmanager:GetSecretValue"
+      Resource = var.secret_arns
+    }]
+  })
 }
 
 resource "aws_iam_role_policy" "task_s3_source" {
@@ -193,7 +243,7 @@ resource "aws_iam_role_policy" "task_monitoring" {
 # Always grant PutMetricData for the imgproxy namespace so autoscaling alarms
 # receive WorkersUtilization data regardless of enable_monitoring.
 resource "aws_iam_role_policy" "task_autoscaling_metrics" {
-  count = var.task_role_arn == null ? 1 : 0
+  count = var.task_role_arn == null && !local.is_lambda ? 1 : 0
   name  = "${var.service_name}-autoscaling-metrics"
   role  = aws_iam_role.task[0].name
 
@@ -215,7 +265,7 @@ resource "aws_iam_role_policy" "task_autoscaling_metrics" {
 # ── CloudWatch Log Group ──────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "main" {
-  name              = "/aws/ecs/${var.service_name}"
+  name              = coalesce(var.log_group_name, "/aws/ecs/${var.service_name}")
   retention_in_days = var.log_retention_days
   tags              = var.tags
 }
@@ -483,22 +533,36 @@ resource "aws_cloudfront_cache_policy" "main" {
   }
 }
 
+resource "aws_cloudfront_origin_access_control" "lambda" {
+  count = local.cf_lambda_origin ? 1 : 0
+
+  name                              = var.service_name
+  description                       = "${var.service_name} Lambda Function URL"
+  origin_access_control_origin_type = "lambda"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
 resource "aws_cloudfront_distribution" "main" {
-  count = var.enable_cloudfront && var.create_alb ? 1 : 0
+  count = var.enable_cloudfront && (var.create_alb || local.is_lambda) ? 1 : 0
 
   origin {
-    domain_name = coalesce(var.cloudfront_origin_domain, aws_lb.main[0].dns_name)
-    origin_id   = "alb"
+    domain_name              = local.cf_lambda_origin ? local.lambda_url_host : coalesce(var.cloudfront_origin_domain, aws_lb.main[0].dns_name)
+    origin_id                = local.cf_lambda_origin ? "lambda" : "alb"
+    origin_access_control_id = local.cf_lambda_origin ? aws_cloudfront_origin_access_control.lambda[0].id : null
 
-    custom_header {
-      name  = local.origin_verify_header
-      value = local.origin_verify_secret
+    dynamic "custom_header" {
+      for_each = local.cf_lambda_origin ? [] : [1]
+      content {
+        name  = local.origin_verify_header
+        value = local.origin_verify_secret
+      }
     }
 
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = local.cf_origin_protocol
+      origin_protocol_policy = local.cf_lambda_origin ? "https-only" : local.cf_origin_protocol
       origin_ssl_protocols   = ["TLSv1.2"]
     }
 
@@ -520,7 +584,7 @@ resource "aws_cloudfront_distribution" "main" {
   default_cache_behavior {
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "alb"
+    target_origin_id       = local.cf_lambda_origin ? "lambda" : "alb"
     viewer_protocol_policy = var.cdn_redirect_http_to_https ? "redirect-to-https" : "allow-all"
     cache_policy_id        = aws_cloudfront_cache_policy.main[0].id
     compress               = true

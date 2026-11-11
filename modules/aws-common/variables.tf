@@ -11,6 +11,17 @@ variable "tags" {
   description = "Tags applied to all created resources."
 }
 
+variable "compute_platform" {
+  type        = string
+  default     = "ecs"
+  description = "Compute platform the shared resources are created for: \"ecs\" (Fargate and EC2) or \"lambda\". With \"lambda\" the task role becomes the Lambda function role, no ECS execution role is created, and CloudFront uses a Lambda Function URL origin with Origin Access Control."
+
+  validation {
+    condition     = contains(["ecs", "lambda"], var.compute_platform)
+    error_message = "compute_platform must be \"ecs\" or \"lambda\"."
+  }
+}
+
 # ── IAM ───────────────────────────────────────────────────────────────────────
 
 variable "execution_role_arn" {
@@ -51,6 +62,12 @@ variable "secret_arns" {
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+variable "log_group_name" {
+  type        = string
+  default     = null
+  description = "CloudWatch log group name. Defaults to /aws/ecs/<service_name>; Lambda requires /aws/lambda/<function name>."
+}
+
 variable "log_retention_days" {
   type        = number
   default     = 365
@@ -75,6 +92,20 @@ variable "alb_subnet_ids" {
   type        = list(string)
   default     = null
   description = "Subnet IDs for the ALB. Defaults to subnet_ids when null."
+}
+
+# ── Lambda ────────────────────────────────────────────────────────────────────
+
+variable "lambda_function_url" {
+  type        = string
+  default     = null
+  description = "Lambda Function URL used as the CloudFront origin. Required when compute_platform = \"lambda\" and enable_cloudfront = true."
+}
+
+variable "lambda_vpc_access" {
+  type        = bool
+  default     = false
+  description = "Attach the AWS-managed VPC access policy to the Lambda function role (needed when the function is attached to a VPC)."
 }
 
 # ── ALB ───────────────────────────────────────────────────────────────────────
@@ -148,7 +179,7 @@ variable "alb_deletion_protection" {
 variable "enable_cloudfront" {
   type        = bool
   default     = false
-  description = "Create a CloudFront distribution in front of the ALB."
+  description = "Create a CloudFront distribution in front of the ALB, or of the Lambda Function URL when compute_platform = \"lambda\"."
 }
 
 variable "cloudfront_certificate_arn" {

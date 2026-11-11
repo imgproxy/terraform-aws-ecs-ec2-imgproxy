@@ -32,12 +32,13 @@ aws configure
 # or: aws sso login --profile my-profile && export AWS_PROFILE=my-profile
 ```
 
-> The `aws` commands below use `--profile my-profile`: replace it with your profile, or drop it if you use the default credentials.
+> The `aws` commands below use `--profile $PROFILE_NAME`, set at the start of Prerequisites: use your profile, or drop the flag if you use the default credentials.
 > An `aws: [ERROR]: An error occurred (ForbiddenException) when calling the GetRoleCredentials operation: No access` error usually means the profile is missing or wrong.
 
 ## Prerequisites
 
 ```bash
+PROFILE_NAME=my-profile # AWS CLI profile used by Terraform; see AWS setup
 REGION=us-east-1
 ```
 
@@ -45,7 +46,7 @@ REGION=us-east-1
 
 ```bash
 echo "region = \"$REGION\"" > terraform.tfvars
-echo "profile = \"my-profile\"" >> terraform.tfvars # your AWS CLI profile; omit for default credentials
+echo "profile = \"$PROFILE_NAME\"" >> terraform.tfvars # AWS CLI profile used by Terraform; omit for default credentials
 
 terraform init
 terraform plan
